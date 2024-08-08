@@ -37,16 +37,17 @@ import com.topjohnwu.superuser.Shell
 import com.topjohnwu.superuser.Shell.FLAG_MOUNT_MASTER
 import com.topjohnwu.superuser.Shell.FLAG_REDIRECT_STDERR
 import com.topjohnwu.superuser.io.SuFile
-import com.topjohnwu.superuser.io.SuFileInputStream
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.andbootmgr.app.themes.ThemeViewModel
+import org.andbootmgr.app.themes.Themes
 import org.andbootmgr.app.util.AbmTheme
 import org.andbootmgr.app.util.ConfigFile
 import org.andbootmgr.app.util.SDUtils
 import org.andbootmgr.app.util.Toolkit
 import java.io.File
-import java.io.IOException
-import java.util.stream.Collectors
 
 class MainActivityState {
 	fun startFlow(flow: String) {
@@ -88,21 +89,68 @@ class MainActivityState {
 	var activity: MainActivity? = null
 	var deviceInfo: DeviceInfo? = null
 	var currentNav by mutableStateOf("start")
+	val theme = ThemeViewModel(this)
+	var defaultCfg = mutableStateMapOf<String, String>()
 	var isReady = false
 	var name by mutableStateOf("") /* default value moved to onCreate() */
 	var navController: NavHostController? = null
-	@OptIn(ExperimentalMaterial3Api::class)
 	var drawerState: DrawerState? = null
 	var scope: CoroutineScope? = null
 	var root = false
 	var isOk = false
 	var logic: DeviceLogic? = null
+
+	private fun loadDefaultCfg() {
+		CoroutineScope(Dispatchers.IO).launch {
+			val cfg = ConfigFile.importFromFile(logic!!.abmDbConf).toMap()
+			withContext(Dispatchers.Main) {
+				defaultCfg.clear()
+				defaultCfg.putAll(cfg)
+			}
+		}
+	}
+
+	suspend fun editDefaultCfg(changes: Map<String, String?>) {
+		val changesSafe = changes.toMutableMap() // multi threading may mean parameter is edited
+		if (!logic!!.mounted) throw IllegalStateException("bootset not mounted")
+		withContext(Dispatchers.Main) {
+			changesSafe.forEach { (t, u) ->
+				if (u != null) defaultCfg[t] = u else defaultCfg.remove(t)
+			}
+			try {
+				val cfg = defaultCfg.toMutableMap()
+				withContext(Dispatchers.IO) {
+					ConfigFile(cfg).exportToFile(logic!!.abmDbConf)
+				}
+			} catch (e: ActionAbortedError) {
+				Log.e("ABM", Log.getStackTraceString(e))
+				Toast.makeText(
+					activity!!,
+					activity!!.getString(R.string.failed2save), Toast.LENGTH_LONG
+				).show()
+			}
+		}
+	}
+
+	fun mountBootset() {
+		logic!!.mountBootset(deviceInfo!!)
+		loadDefaultCfg()
+	}
+
+	fun unmountBootset() {
+		defaultCfg.clear()
+		logic!!.unmountBootset()
+	}
+
+	fun remountBootset() {
+		logic!!.unmountBootset()
+		logic!!.mountBootset(deviceInfo!!)
+	}
 }
 
 
 class MainActivity : ComponentActivity() {
 
-	@OptIn(ExperimentalMaterial3Api::class)
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
 		val vm = MainActivityState()
@@ -148,48 +196,46 @@ class MainActivity : ComponentActivity() {
 				}
 				if (!fail) {
 					Shell.getShell { shell ->
-						vm.root = shell.isRoot
-						val codename: String
-						var b: ByteArray? = null
-						if (vm.root) {
-							try {
-								val f = SuFile.open(vm.logic!!.abmDir, "codename.cfg")
-								val s = SuFileInputStream.open(f)
-								b = s.readBytes()
-								s.close()
-							} catch (e: IOException) {
-								Log.e("ABM_GetCodeName", Log.getStackTraceString(e))
+						Thread {
+							vm.root = shell.isRoot
+							vm.deviceInfo = JsonDeviceInfoFactory(vm.activity!!).get(Build.DEVICE)
+							// == temp migration code start ==
+							if (Shell.cmd("mountpoint -q /data/abm/bootset").exec().isSuccess) {
+								Shell.cmd("umount /data/abm/bootset").exec()
 							}
-						}
-						codename = if (b != null) {
-							String(b).trim()
-						} else {
-							Build.DEVICE
-						}
-						vm.deviceInfo = HardcodedDeviceInfoFactory.get(codename)
-						if (vm.deviceInfo != null && vm.deviceInfo!!.isInstalled(vm.logic!!)) {
-							vm.logic!!.mount(vm.deviceInfo!!)
-						}
-						if (vm.deviceInfo != null) {
-							vm.isOk = ((vm.deviceInfo!!.isInstalled(vm.logic!!)) &&
-							 vm.deviceInfo!!.isBooted(vm.logic!!) &&
-							 !(!vm.logic!!.mounted || vm.deviceInfo!!.isCorrupt(vm.logic!!)))
-						}
-						runOnUiThread {
-							setContent {
-								val navController = rememberNavController()
-								val drawerState = rememberDrawerState(DrawerValue.Closed)
-								val scope = rememberCoroutineScope()
-								vm.navController = navController
-								vm.drawerState = drawerState
-								vm.scope = scope
-								vm.noobMode = LocalContext.current.getSharedPreferences("abm", 0).getBoolean("noob_mode", BuildConfig.DEFAULT_NOOB_MODE)
-								AppContent(vm) {
-									NavGraph(vm, it)
+							SuFile.open("/data/abm").let {
+								if (it.exists())
+									Shell.cmd("rm -rf /data/abm").exec()
+							}
+							// == temp migration code end ==
+							if (vm.deviceInfo != null && vm.deviceInfo!!.isInstalled(vm.logic!!)) {
+								vm.mountBootset()
+							} else {
+								Log.i("ABM", "not installed, not trying to mount")
+							}
+							if (vm.deviceInfo != null) {
+								vm.isOk = ((vm.deviceInfo!!.isInstalled(vm.logic!!)) &&
+										vm.deviceInfo!!.isBooted(vm.logic!!) &&
+										!(!vm.logic!!.mounted || vm.deviceInfo!!.isCorrupt(vm.logic!!)))
+							}
+							runOnUiThread {
+								setContent {
+									val navController = rememberNavController()
+									val drawerState = rememberDrawerState(DrawerValue.Closed)
+									val scope = rememberCoroutineScope()
+									vm.navController = navController
+									vm.drawerState = drawerState
+									vm.scope = scope
+									vm.noobMode =
+										LocalContext.current.getSharedPreferences("abm", 0)
+											.getBoolean("noob_mode", BuildConfig.DEFAULT_NOOB_MODE)
+									AppContent(vm) {
+										NavGraph(vm, it)
+									}
 								}
+								vm.isReady = true
 							}
-							vm.isReady = true
-						}
+						}.start()
 					}
 				} else {
 					setContent {
@@ -220,12 +266,12 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppContent(vm: MainActivityState, view: @Composable (PaddingValues) -> Unit) {
+fun AppContent(vm: MainActivityState, view: @Composable (PaddingValues) -> Unit) {
 	val drawerState = vm.drawerState!!
 	val scope = vm.scope!!
 	var fabhint by remember { mutableStateOf(false) }
 	val fab = @Composable {
-		if (vm.noobMode && vm.currentNav == "start") {
+		if (vm.noobMode && vm.isOk && vm.currentNav == "start") {
 			FloatingActionButton(onClick = { fabhint = true }) {
 				Icon(Icons.Default.Add, stringResource(R.string.add_icon_content_desc))
 			}
@@ -235,27 +281,43 @@ private fun AppContent(vm: MainActivityState, view: @Composable (PaddingValues) 
 		// A surface container using the 'background' color from the theme
 		Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
 			ModalNavigationDrawer(drawerContent = {
-				Button(
-					modifier = Modifier
-						.align(Alignment.CenterHorizontally)
-						.padding(top = 16.dp),
-					onClick = { scope.launch {
-						vm.navController!!.navigate("start")
-						drawerState.close()
-					} },
-					content = { Text(stringResource(R.string.home)) }
-				)
-				Button(
-					modifier = Modifier
-						.align(Alignment.CenterHorizontally)
-						.padding(top = 16.dp),
-					onClick = { if (vm.isOk) scope.launch {
-						vm.navController!!.navigate("settings")
-						drawerState.close()
-					} },
-					enabled = vm.isOk,
-					content = { Text(stringResource(R.string.settings)) }
-				)
+				ModalDrawerSheet {
+					NavigationDrawerItem(
+						label = { Text(stringResource(R.string.home)) },
+						selected = vm.currentNav == "start",
+						onClick = {
+							scope.launch {
+								vm.navController!!.navigate("start")
+								drawerState.close()
+							}
+						},
+						modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
+					)
+					if (vm.isOk) {
+						NavigationDrawerItem(
+							label = { Text(stringResource(R.string.themes)) },
+							selected = vm.currentNav == "themes",
+							onClick = {
+								scope.launch {
+									vm.navController!!.navigate("themes")
+									drawerState.close()
+								}
+							},
+							modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
+						)
+						NavigationDrawerItem(
+							label = { Text(stringResource(R.string.settings)) },
+							selected = vm.currentNav == "settings",
+							onClick = {
+								scope.launch {
+									vm.navController!!.navigate("settings")
+									drawerState.close()
+								}
+							},
+							modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
+						)
+					}
+				}
 			},
 				drawerState = drawerState,
 				content = {
@@ -281,7 +343,7 @@ private fun AppContent(vm: MainActivityState, view: @Composable (PaddingValues) 
 								scope.launch { drawerState.open() }
 							})
 						})
-					}, content = view, floatingActionButton = fab)
+					}, content = view, floatingActionButton = fab, modifier = Modifier.fillMaxWidth())
 				}
 			)
 		}
@@ -290,10 +352,14 @@ private fun AppContent(vm: MainActivityState, view: @Composable (PaddingValues) 
 
 @Composable
 private fun NavGraph(vm: MainActivityState, it: PaddingValues) {
-	NavHost(navController = vm.navController!!, startDestination = "start", modifier = Modifier.padding(it)) {
+	NavHost(navController = vm.navController!!, startDestination = "start", modifier = Modifier.padding(it).fillMaxSize()) {
 		composable("start") {
 			vm.currentNav = "start"
 			Start(vm)
+		}
+		composable("themes") {
+			vm.currentNav = "themes"
+			Themes(vm.theme)
 		}
 		composable("settings") {
 			vm.currentNav = "settings"
@@ -387,30 +453,23 @@ private fun Start(vm: MainActivityState) {
 				}
 			}
 		}
-		if (Shell.isAppGrantedRoot() == false) {
+		if (Shell.isAppGrantedRoot() != true) {
 			Text(
 				stringResource(R.string.need_root),
 				textAlign = TextAlign.Center
 			)
 		} else if (metaonsd && !sdpresent) {
 			Text(stringResource(R.string.need_sd), textAlign = TextAlign.Center)
-		} else if (!installed) {
+		} else if (!installed && !mounted) {
 			Button(onClick = { vm.startFlow("droidboot") }) {
 				Text(stringResource(if (metaonsd) R.string.setup_sd else R.string.install))
 			}
-		} else if (!booted) {
+		} else if (!booted && mounted) {
 			Text(stringResource(R.string.installed_not_booted), textAlign = TextAlign.Center)
 			Button(onClick = {
 				vm.startFlow("fix_droidboot")
 			}) {
 				Text(stringResource(R.string.repair_droidboot))
-			}
-		} else if (!metaonsd && mounted && corrupt) {
-			Text(stringResource(R.string.missing_cfg), textAlign = TextAlign.Center)
-			Button(onClick = {
-				//vm.startFlow("repair_cfg") TODO:Implement this
-			}) {
-				Text(stringResource(R.string.repair_cfg))
 			}
 		} else if (!mounted) {
 			Text(stringResource(R.string.cannot_mount), textAlign = TextAlign.Center)
@@ -422,7 +481,6 @@ private fun Start(vm: MainActivityState) {
 	}
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PartTool(vm: MainActivityState) {
 	var filterUnifiedView by remember { mutableStateOf(true) }
@@ -489,14 +547,7 @@ private fun PartTool(vm: MainActivityState) {
 			)
 		}
 
-	var parts by remember {
-		mutableStateOf(
-			SDUtils.generateMeta(
-				vm.deviceInfo!!.bdev,
-				vm.deviceInfo!!.pbdev
-			)
-		)
-	}
+	var parts by remember { mutableStateOf(SDUtils.generateMeta(vm.deviceInfo!!)) }
 	if (parts == null) {
 		Text(stringResource(R.string.part_wizard_err))
 		return
@@ -699,7 +750,7 @@ private fun PartTool(vm: MainActivityState) {
 									Row {
 										Button(onClick = {
 											processing = true
-											Shell.cmd(p.mount()).submit {
+											vm.logic!!.mount(p).submit {
 												processing = false
 												result = it.out.join("\n") + it.err.join("\n")
 											}
@@ -708,7 +759,7 @@ private fun PartTool(vm: MainActivityState) {
 										}
 										Button(onClick = {
 											processing = true
-											Shell.cmd(p.unmount()).submit {
+											vm.logic!!.unmount(p).submit {
 												processing = false
 												result = it.out.join("\n") + it.err.join("\n")
 											}
@@ -764,12 +815,9 @@ private fun PartTool(vm: MainActivityState) {
 							if (!e) {
 								processing = true
 								rename = false
-								Shell.cmd(SDUtils.umsd(parts!!) + " && " + p.rename(t)).submit { r ->
+								vm.logic!!.rename(p, t).submit { r ->
 									result = r.out.join("\n") + r.err.join("\n")
-									parts = SDUtils.generateMeta(
-										vm.deviceInfo!!.bdev,
-										vm.deviceInfo!!.pbdev
-									)
+									parts = SDUtils.generateMeta(vm.deviceInfo!!)
 									editPartID = parts?.s!!.findLast { it.id == p.id }
 									processing = false
 								}
@@ -799,12 +847,17 @@ private fun PartTool(vm: MainActivityState) {
 						Button(onClick = {
 							processing = true
 							delete = false
-							Shell.cmd(SDUtils.umsd(parts!!) + " && " + p.delete()).submit {
-								processing = false
-								editPartID = null
-								parts =
-									SDUtils.generateMeta(vm.deviceInfo!!.bdev, vm.deviceInfo!!.pbdev)
-								result = it.out.join("\n") + it.err.join("\n")
+							val wasMounted = vm.logic!!.mounted
+							vm.unmountBootset()
+							vm.logic!!.delete(p).submit {
+								vm.mountBootset()
+								if (wasMounted != vm.logic!!.mounted) vm.activity!!.finish()
+								else {
+									processing = false
+									editPartID = null
+									parts = SDUtils.generateMeta(vm.deviceInfo!!)
+									result = it.out.join("\n") + it.err.join("\n")
+								}
 							}
 						}) {
 							Text(stringResource(R.string.delete))
@@ -916,7 +969,7 @@ private fun PartTool(vm: MainActivityState) {
 					}
 				},
 				confirmButton = {
-					if (f != null) {
+					if (f != null && e["xpart"] != "real") {
 						Button(
 							onClick = {
 								f!!.delete()
@@ -964,7 +1017,7 @@ private fun PartTool(vm: MainActivityState) {
 					}
 				}
 			)
-		} else if (editEntryID != null && filterUnifiedView) {
+		} else if (editEntryID != null) {
 			val e = editEntryID!!
 			AlertDialog(
 				onDismissRequest = {
@@ -1026,19 +1079,15 @@ private fun PartTool(vm: MainActivityState) {
 							Thread {
 								var tresult = ""
 								if (e.has("xpart") && !e["xpart"].isNullOrBlank()) {
-									val allp = e["xpart"]!!.split(":").stream()
+									val allp = e["xpart"]!!.split(":")
 										.map { parts!!.dumpKernelPartition(Integer.valueOf(it)) }
-										.map { it.delete() }.collect(
-											Collectors.toList()
-										)
-									for (s in allp) { // Do not chain, but regenerate meta and unmount every time. Thanks void
-										val r = Shell.cmd(
-											SDUtils.umsd(parts!!) + " && " + s
-										).exec()
-										parts =
-											SDUtils.generateMeta(vm.deviceInfo!!.bdev, vm.deviceInfo!!.pbdev)
+									vm.unmountBootset()
+									for (p in allp) { // Do not chain, but regenerate meta and unmount every time. Thanks void
+										val r = vm.logic!!.delete(p).exec()
+										parts = SDUtils.generateMeta(vm.deviceInfo!!)
 										tresult += r.out.join("\n") + r.err.join("\n") + "\n"
 									}
+									vm.mountBootset()
 								}
 								val f = entries[e]!!
 								val f2 = SuFile(vm.logic!!.abmBootset, f.nameWithoutExtension)
@@ -1049,8 +1098,7 @@ private fun PartTool(vm: MainActivityState) {
 									tresult += vm.activity!!.getString(R.string.cannot_delete, f.absolutePath)
 								editEntryID = null
 								processing = false
-								parts =
-									SDUtils.generateMeta(vm.deviceInfo!!.bdev, vm.deviceInfo!!.pbdev)
+								parts = SDUtils.generateMeta(vm.deviceInfo!!)
 								result = tresult
 							}.start()
 						}) {
@@ -1100,87 +1148,6 @@ private fun PartTool(vm: MainActivityState) {
 	}
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun Settings(vm: MainActivityState) {
-	val ctx = LocalContext.current
-	val c = remember {
-		try {
-			if (vm.logic == null)
-				throw ActionAbortedCleanlyError(Exception("Compose preview special-casing"))
-			ConfigFile.importFromFile(File(vm.logic!!.abmDb, "db.conf"))
-		} catch (e: ActionAbortedCleanlyError) {
-			if (vm.activity != null) // Compose preview special-casing
-				Toast.makeText(vm.activity, vm.activity!!.getString(R.string.malformed_dbcfg), Toast.LENGTH_LONG).show()
-			ConfigFile().also {
-				it["default"] = "Entry 01"
-				it["timeout"] = "5"
-			}
-		}
-	}
-	var defaultText by remember { mutableStateOf(c["default"]!!) }
-	val defaultErr = defaultText.isBlank() || !defaultText.matches(Regex("[\\dA-Za-z ]+"))
-	var timeoutText by remember { mutableStateOf(c["timeout"]!!) }
-	val timeoutErr = timeoutText.isBlank() || !timeoutText.matches(Regex("\\d+"))
-	Column {
-		TextField(
-			value = defaultText,
-			onValueChange = {
-				defaultText = it
-				c["default"] = it.trim()
-			},
-			label = { Text(stringResource(R.string.default_entry)) },
-			isError = defaultErr
-		)
-		if (defaultErr) {
-			Text(stringResource(id = R.string.invalid_in), color = MaterialTheme.colorScheme.error)
-		} else {
-			Text("") // Budget spacer
-		}
-		TextField(
-			value = timeoutText,
-			onValueChange = {
-				timeoutText = it
-				c["timeout"] = it.trim()
-			},
-			label = { Text(stringResource(R.string.timeout_secs)) },
-			isError = timeoutErr
-		)
-		if (timeoutErr) {
-			Text(stringResource(id = R.string.invalid_in), color = MaterialTheme.colorScheme.error)
-		} else {
-			Text("") // Budget spacer
-		}
-		Button(onClick = {
-			if (defaultErr || timeoutErr)
-				Toast.makeText(vm.activity!!, vm.activity!!.getString(R.string.invalid_in), Toast.LENGTH_LONG).show()
-			else {
-				try {
-					c.exportToFile(File(vm.logic!!.abmDb, "db.conf"))
-				} catch (e: ActionAbortedError) {
-					Toast.makeText(vm.activity!!, vm.activity!!.getString(R.string.failed2save), Toast.LENGTH_LONG)
-						.show()
-				}
-			}
-		}, enabled = !(defaultErr || timeoutErr)) {
-			Text(stringResource(R.string.save_changes))
-		}
-		Button(onClick = {
-			vm.startFlow("update_droidboot")
-		}) {
-			Text(stringResource(R.string.update_droidboot))
-		}
-		Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-			Text(stringResource(R.string.noob_mode))
-			Switch(checked = vm.noobMode, onCheckedChange = {
-				vm.noobMode = it
-				ctx.getSharedPreferences("abm", 0).edit().putBoolean("noob_mode", it).apply()
-			})
-		}
-	}
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Preview(showBackground = true)
 @Composable
 private fun Preview() {

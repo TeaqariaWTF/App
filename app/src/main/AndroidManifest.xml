@@ -5,6 +5,7 @@
 	<uses-permission android:name="android.permission.INTERNET" />
 
 	<application
+		android:gwpAsanMode="always"
 		android:allowBackup="false"
 		android:dataExtractionRules="@xml/data_extraction_rules"
 		android:icon="@mipmap/ic_launcher"
@@ -32,6 +33,17 @@
 				<category android:name="android.intent.category.LAUNCHER" />
 			</intent-filter>
 		</activity>
+		<activity
+			android:name=".themes.Simulator"
+			android:exported="false"
+			android:process=":simulator"
+			android:taskAffinity=""
+			android:noHistory="true"
+			android:screenOrientation="nosensor"
+			android:excludeFromRecents="true"
+			android:configChanges="keyboard|keyboardHidden|uiMode"
+			android:theme="@style/Simulator"
+			tools:ignore="DiscouragedApi" />
 	</application>
 
 </manifest>

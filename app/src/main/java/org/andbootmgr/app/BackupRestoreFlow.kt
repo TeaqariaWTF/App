@@ -8,8 +8,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -52,8 +55,10 @@ private class CreateBackupDataHolder(val vm: WizardActivityState){
 
 @Composable
 private fun ChooseAction(c: CreateBackupDataHolder) {
-    c.meta = remember { SDUtils.generateMeta(c.vm.deviceInfo!!.bdev, c.vm.deviceInfo.pbdev) }
-    c.pi = remember { c.vm.activity.intent.getIntExtra("partitionid", -1) }
+    LaunchedEffect(Unit) {
+        c.meta = SDUtils.generateMeta(c.vm.deviceInfo)
+        c.pi = c.vm.activity.intent.getIntExtra("partitionid", -1)
+    }
 
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
         modifier = Modifier.fillMaxSize()
@@ -73,48 +78,42 @@ private fun ChooseAction(c: CreateBackupDataHolder) {
 
 @Composable
 private fun SelectDroidBoot(c: CreateBackupDataHolder) {
-    val nextButtonAvailable = remember { mutableStateOf(false) }
+    var nextButtonAvailable by remember { mutableStateOf(false) }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier.fillMaxSize()
     ) {
-        if (nextButtonAvailable.value) {
+        if (nextButtonAvailable) {
             Text(stringResource(R.string.successfully_selected))
-            c.vm.nextText.value = stringResource(R.string.next)
-            c.vm.onNext.value = { it.navigate("go") }
         } else {
             Text(
-                if (c.action == 1)
-                    stringResource(R.string.make_backup)
-                else if (c.action == 2)
-                    stringResource(R.string.restore_backup)
-                else if (c.action == 3)
-                    stringResource(R.string.restore_backup_sparse)
-                else
-                    ""
+                when (c.action) {
+                    1 -> stringResource(R.string.make_backup)
+                    2 -> stringResource(R.string.restore_backup)
+                    3 -> stringResource(R.string.restore_backup_sparse)
+                    else -> ""
+                }
             )
             Button(onClick = {
                 if (c.action != 1) {
                     c.vm.activity.chooseFile("*/*") {
                         c.path = it
-                        nextButtonAvailable.value = true
+                        nextButtonAvailable = true
+                        c.vm.nextText.value = c.vm.activity.getString(R.string.next)
+                        c.vm.onNext.value = { i -> i.navigate("go") }
                     }
                 } else {
                     c.vm.activity.createFile("${c.meta!!.dumpKernelPartition(c.pi).name}.img") {
                         c.path = it
-                        nextButtonAvailable.value = true
+                        nextButtonAvailable = true
+                        c.vm.nextText.value = c.vm.activity.getString(R.string.next)
+                        c.vm.onNext.value = { i -> i.navigate("go") }
                     }
                 }
             }) {
-                Text(
-                    if (c.action != 1) {
-                        stringResource(R.string.choose_file)
-                    } else {
-                        stringResource(R.string.create_file)
-                    }
-                )
+                Text(stringResource(if (c.action != 1) R.string.choose_file else R.string.create_file))
             }
         }
     }
@@ -125,23 +124,18 @@ private fun Flash(c: CreateBackupDataHolder) {
     Terminal(c.vm, logFile = "flash_${System.currentTimeMillis()}.txt") { terminal ->
         terminal.add(c.vm.activity.getString(R.string.term_starting))
         try {
-            if (!Shell.cmd(SDUtils.umsd(c.meta!!.dumpKernelPartition(c.pi))).to(terminal).exec().isSuccess)
+            val p = c.meta!!.dumpKernelPartition(c.pi)
+            if (!c.vm.logic.unmount(p).to(terminal).exec().isSuccess)
                 throw IOException(c.vm.activity.getString(R.string.term_cant_umount))
             if (c.action == 1) {
                 c.vm.copy(
-                    SuFileInputStream.open(
-                        File(
-                            c.vm.deviceInfo!!.pbdev + (c.pi)
-                        )
-                    ),
+                    SuFileInputStream.open(File(p.path)),
                     c.vm.activity.contentResolver.openOutputStream(c.path!!)!!
                 )
             } else if (c.action == 2) {
                 c.vm.copyPriv(
                     c.vm.activity.contentResolver.openInputStream(c.path!!)!!,
-                    File(
-                        c.vm.deviceInfo!!.pbdev + (c.pi)
-                    )
+                    File(p.path)
                 )
             } else if (c.action == 3) {
                 val f = File(c.vm.logic.cacheDir, System.currentTimeMillis().toString())
@@ -150,9 +144,7 @@ private fun Flash(c: CreateBackupDataHolder) {
                     File(
                         c.vm.logic.assetDir,
                         "Toolkit/simg2img"
-                    ).absolutePath + " ${f.absolutePath} ${
-                        c.vm.deviceInfo!!.pbdev + (c.pi)
-                    }"
+                    ).absolutePath + " ${f.absolutePath} ${p.path}"
                 ).to(terminal).exec()
                 if (!result2.isSuccess) {
                     terminal.add(c.vm.activity.getString(R.string.term_failure))

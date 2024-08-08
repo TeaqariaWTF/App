@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -40,6 +39,7 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.FileNotFoundException
 import java.net.URL
+import java.nio.charset.Charset
 
 class CreatePartWizardPageFactory(private val vm: WizardActivityState) {
 	fun get(): List<IWizardPage> {
@@ -134,13 +134,14 @@ private class CreatePartDataHolder(val vm: WizardActivityState): ProgressListene
 	var f = 0L
 	var t: String? = null
 	var noobMode: Boolean = false
+	var scriptInet: String? = null
+	var scriptShaInet: String? = null
 
 	var painter: @Composable (() -> Painter)? = null
 	var rtype by mutableStateOf("")
 	var cmdline by mutableStateOf("")
-	var shName by mutableStateOf("")
 	val dmaMeta = ArrayMap<String, String>()
-	val count = mutableStateOf(0)
+	val count = mutableIntStateOf(0)
 	val intVals = mutableStateListOf<Long>()
 	val selVals = mutableStateListOf<Int>()
 	val codeVals = mutableStateListOf<String>()
@@ -170,7 +171,7 @@ private class CreatePartDataHolder(val vm: WizardActivityState): ProgressListene
 
 	fun addDefault(i: Long, sel: Int, code: String, id: String, needUnsparse: Boolean) {
 		if (idVals.contains(id)) return
-		count.value++
+		count.intValue++
 		intVals.add(i)
 		selVals.add(sel)
 		codeVals.add(code)
@@ -187,7 +188,7 @@ private class CreatePartDataHolder(val vm: WizardActivityState): ProgressListene
 	@Composable
 	fun lateInit() {
 		noobMode = LocalContext.current.getSharedPreferences("abm", 0).getBoolean("noob_mode", BuildConfig.DEFAULT_NOOB_MODE)
-		meta = SDUtils.generateMeta(vm.deviceInfo!!.bdev, vm.deviceInfo.pbdev)
+		meta = SDUtils.generateMeta(vm.deviceInfo)
 		(meta?.s?.find { vm.activity.intent.getLongExtra("part_sid", -1L) == it.startSector } as SDUtils.Partition.FreeSpace?)?.also { p = it }
 	}
 
@@ -202,17 +203,12 @@ private class CreatePartDataHolder(val vm: WizardActivityState): ProgressListene
 	}
 }
 
-@OptIn(ExperimentalMaterialApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun Start(c: CreatePartDataHolder) {
 	if (c.meta == null) {
 		c.lateInit()
 	}
 	val ctx = LocalContext.current
-
-	// Material3 colors for old RangeSlider
-	val i = SliderDefaults.colors()
-	val sc = androidx.compose.material.SliderDefaults.colors(activeTickColor = i.tickColor(enabled = true, active = true).value, disabledActiveTickColor = i.tickColor(enabled = false, active = true).value, disabledInactiveTickColor = i.tickColor(enabled = false, active = false).value, activeTrackColor = i.trackColor(enabled = true, active = true).value, disabledActiveTrackColor = i.trackColor(enabled = false, active = true).value, disabledInactiveTrackColor = i.trackColor(enabled = false, active = false).value, disabledThumbColor = i.thumbColor(enabled = false).value, inactiveTickColor = i.tickColor(enabled = true, active = false).value, inactiveTrackColor = i.trackColor(enabled = true, active = false).value, thumbColor = i.thumbColor(enabled = true).value)
 
 	val s = rememberScrollState()
 	var et by remember { mutableStateOf(false) }
@@ -257,8 +253,7 @@ private fun Start(c: CreatePartDataHolder) {
 					}, isError = eu, label = {
 						Text(stringResource(R.string.end_sector))
 					})
-					// Material3 RangeSlider is absolutely buggy trash
-					androidx.compose.material.RangeSlider(modifier = Modifier.fillMaxWidth(), colors = sc, values = lu, onValueChange = {
+					RangeSlider(modifier = Modifier.fillMaxWidth(), value =  lu, onValueChange = {
 						l = it.start.toLong().toString()
 						u = it.endInclusive.toLong().toString()
 						el = !l.matches(Regex("\\d+"))
@@ -313,7 +308,7 @@ private fun Start(c: CreatePartDataHolder) {
 						c.l = l
 						c.u = u
 						c.t = t
-						c.f = c.p.size - c.u.toLong()
+						c.f = (c.p.size - c.u.toLong()).coerceAtLeast(0) // TODO fix range slider inaccuracies instead
 						c.vm.navigate("flash")
 					}) {
 						Text(stringResource(id = R.string.create))
@@ -338,7 +333,7 @@ private fun Start(c: CreatePartDataHolder) {
 						c.l = l
 						c.u = u
 						c.t = null
-						c.f = c.p.size - c.u.toLong()
+						c.f = (c.p.size - c.u.toLong()).coerceAtLeast(0) // TODO fix range slider inaccuracies instead
 						c.vm.navigate("shop")
 					}) {
 						Text(stringResource(R.string.cont))
@@ -363,7 +358,10 @@ private fun Shop(c: CreatePartDataHolder) {
 					} catch (e: FileNotFoundException) {
 						URL("https://raw.githubusercontent.com/Android-Boot-Manager/ABM-json/master/devices/" + c.vm.codename + ".json").readText()
 					}
-					json = JSONTokener(jsonText).nextValue() as JSONObject
+					val jjson = JSONTokener(jsonText).nextValue() as JSONObject
+					if (BuildConfig.VERSION_CODE < jjson.getInt("minAppVersion"))
+						throw IllegalStateException("please upgrade app")
+					json = jjson
 					//Log.i("ABM shop:", jsonText)
 				} catch (e: Exception) {
 					Log.e("ABM shop", Log.getStackTraceString(e))
@@ -401,11 +399,13 @@ private fun Shop(c: CreatePartDataHolder) {
 								dmaMeta["name"] =
 									o.getString("displayname")
 								dmaMeta["creator"] = o.getString("creator")
+								c.scriptInet = o.getString("scriptname")
+								if (o.has("scriptSha256"))
+									c.scriptShaInet = o.getString("scriptSha256")
 								dmaMeta["updateJson"] = o.getString("updateJson")
 								rtype = o.getString("rtype")
 								cmdline =
 									o.getString("cmdline")
-								shName = o.getString("scriptname")
 								i = 0
 								val partitionParams = o.getJSONArray("partitions")
 								while (i < partitionParams.length()) {
@@ -471,7 +471,7 @@ private fun Os(c: CreatePartDataHolder) {
 	}
 
 	LaunchedEffect(Unit) {
-		val a = SuFile.open("/data/abm/bootset/db/entries/").list()!!.toMutableList()
+		val a = SuFile.open(c.vm.logic.abmEntries.absolutePath).list()!!.toMutableList()
 		a.removeIf { c -> !(c.startsWith("rom") && c.endsWith(".conf") && c.substring(3, c.length - 5).matches(Regex("\\d+"))) }
 		a.sortWith(Comparator.comparingInt { c -> c.substring(3, c.length - 5).toInt() })
 		val b = if (a.size > 0) a.last().substring(3, a.last().length - 5).toInt() + 1 else 0
@@ -480,7 +480,7 @@ private fun Os(c: CreatePartDataHolder) {
 	}
 
 	val s = rememberScrollState()
-	var expanded by remember { mutableStateOf(0) }
+	var expanded by remember { mutableIntStateOf(0) }
 	var e by remember { mutableStateOf(false) }
 	Column(
 		Modifier
@@ -565,9 +565,9 @@ private fun Os(c: CreatePartDataHolder) {
 				Modifier
 					.fillMaxWidth()) {
 
-				for (i in 1..c.count.value) {
-					val selectedValue = remember { mutableStateOf(c.selVals.getOrElse(i-1) { 1 }) }
-					val intValue = remember { mutableStateOf(c.intVals.getOrElse(i-1) { 100L }) }
+				for (i in 1..c.count.intValue) {
+					val selectedValue = remember { mutableIntStateOf(c.selVals.getOrElse(i-1) { 1 }) }
+					val intValue = remember { mutableLongStateOf(c.intVals.getOrElse(i-1) { 100L }) }
 					var codeValue by remember { mutableStateOf(c.codeVals.getOrElse(i-1) { "8305" }) }
 					var idValue by remember { mutableStateOf(c.idVals.getOrElse(i-1) { "" }) }
 					var d by remember { mutableStateOf(false) }
@@ -575,8 +575,8 @@ private fun Os(c: CreatePartDataHolder) {
 					val items = listOf("bytes", "percent")
 					val items2 = listOf("0700", "8302", "8305")
 					val codes = listOf(stringResource(R.string.portable_part), stringResource(R.string.os_userdata), stringResource(R.string.os_system))
-					val isSelectedItem: (String) -> Boolean = { items[selectedValue.value] == it }
-					val onChangeState: (String) -> Unit = { selectedValue.value = items.indexOf(it) }
+					val isSelectedItem: (String) -> Boolean = { items[selectedValue.intValue] == it }
+					val onChangeState: (String) -> Unit = { selectedValue.intValue = items.indexOf(it) }
 
 					Card(
 						modifier = Modifier
@@ -591,14 +591,14 @@ private fun Os(c: CreatePartDataHolder) {
 							var sts: Long = -1
 							var remaining = c.availableSize
 							if (i-1 < c.selVals.size) {
-								c.selVals[i - 1] = selectedValue.value
+								c.selVals[i - 1] = selectedValue.intValue
 							} else {
-								c.selVals.add(i - 1, selectedValue.value)
+								c.selVals.add(i - 1, selectedValue.intValue)
 							}
 							if (i-1 < c.intVals.size) {
-								c.intVals[i - 1] = intValue.value
+								c.intVals[i - 1] = intValue.longValue
 							} else {
-								c.intVals.add(i - 1, intValue.value)
+								c.intVals.add(i - 1, intValue.longValue)
 							}
 							if (i-1 < c.codeVals.size) {
 								c.codeVals[i - 1] = codeValue
@@ -627,10 +627,10 @@ private fun Os(c: CreatePartDataHolder) {
 							}
 							remaining += sts
 
-							Text(text = stringResource(R.string.sector_used, intValue.value, items[selectedValue.value], sts, remaining))
-							TextField(value = intValue.value.toString(), onValueChange = {
+							Text(text = stringResource(R.string.sector_used, intValue.longValue, items[selectedValue.intValue], sts, remaining))
+							TextField(value = intValue.longValue.toString(), onValueChange = {
 								if (it.matches(Regex("\\d+"))) {
-									intValue.value = it.toLong()
+									intValue.longValue = it.toLong()
 								}
 							}, label = {
 								Text(stringResource(R.string.size))
@@ -702,14 +702,14 @@ private fun Os(c: CreatePartDataHolder) {
 					}
 				}
 				Row(verticalAlignment = Alignment.CenterVertically) {
-					Button(onClick = { c.count.value += 1 }) {
+					Button(onClick = { c.count.intValue += 1 }) {
 						Text("+")
 					}
-					Button(onClick = { c.count.value -= 1 }, enabled = (c.count.value > 1)) {
+					Button(onClick = { c.count.intValue -= 1 }, enabled = (c.count.intValue > 1)) {
 						Text("-")
 					}
 					var remaining = c.availableSize
-					for (j in 1 .. c.count.value) {
+					for (j in 1 .. c.count.intValue) {
 						val k = c.intVals.getOrElse(j-1) { 0L }
 						val l = c.selVals.getOrElse(j-1) { 1 }
 						val sts = if (l == 0 /*bytes*/) {
@@ -801,8 +801,7 @@ private fun Download(c: CreatePartDataHolder) {
 					}
 				})
 		}
-		for (i in c.idNeeded) {
-			val inet = c.inetAvailable.containsKey(i)
+		for (i in (c.idNeeded + listOf("_install.sh_"))) {
 			Row(
 				verticalAlignment = Alignment.CenterVertically,
 				horizontalArrangement = Arrangement.SpaceBetween,
@@ -811,7 +810,8 @@ private fun Download(c: CreatePartDataHolder) {
 				Column {
 					Text(i)
 					Text(
-						if (c.inetDesc.containsKey(i)) c.inetDesc[i]!! else stringResource(R.string.user_selected),
+						if (c.inetDesc.containsKey(i)) c.inetDesc[i]!! else stringResource(
+							if (i == "_install.sh_") R.string.installer_sh else R.string.user_selected),
 						color = MaterialTheme.colorScheme.onSurfaceVariant
 					)
 				}
@@ -824,7 +824,7 @@ private fun Download(c: CreatePartDataHolder) {
 							Text(stringResource(R.string.undo))
 						}
 					} else {
-						if (inet) {
+						if (c.inetAvailable.containsKey(i) || i == "_install.sh_") {
 							Button(onClick = {
 								downloading = true
 								progressText = c.vm.activity.getString(R.string.connecting_text)
@@ -842,7 +842,8 @@ private fun Download(c: CreatePartDataHolder) {
 									try {
 										val downloadedFile = File(c.vm.logic.cacheDir, i)
 										val request =
-											Request.Builder().url(c.inetAvailable[i]!!).build()
+											Request.Builder().url(if (i == "_install.sh_")
+												c.scriptInet!! else c.inetAvailable[i]!!).build()
 										val call = c.client.newCall(request)
 										val response = call.execute()
 
@@ -851,10 +852,17 @@ private fun Download(c: CreatePartDataHolder) {
 											downloadedFile.delete()
 											downloading = false
 										}
+										val desiredHash = if (i == "_install.sh_") c.scriptShaInet!! else null
 
-										val sink = downloadedFile.sink().buffer()
-										sink.writeAll(response.body!!.source())
-										sink.close()
+										val rawSink = downloadedFile.sink()
+										val sink = if (desiredHash != null) HashingSink.sha256(rawSink) else rawSink
+										val buffer = sink.buffer()
+										buffer.writeAll(response.body!!.source())
+										buffer.close()
+										val realHash = if (desiredHash != null)
+												(sink as HashingSink).hash.hex() else null
+										if (desiredHash != null && realHash != desiredHash)
+											throw IllegalStateException("hash $realHash does not match expected hash $desiredHash")
 
 										if (!call.isCanceled())
 											c.chosen[i] = DledFile(null, downloadedFile)
@@ -887,7 +895,7 @@ private fun Download(c: CreatePartDataHolder) {
 			}
 		}
 		c.vm.btnsOverride = true
-		if (c.idNeeded.find { !c.chosen.containsKey(it) } == null) {
+		if (c.idNeeded.find { !c.chosen.containsKey(it) } == null && c.chosen.containsKey("_install.sh_")) {
 			c.vm.onNext.value = { it.navigate("flash") }
 			c.vm.nextText.value = stringResource(id = R.string.install)
 		} else {
@@ -902,15 +910,22 @@ private fun Flash(c: CreatePartDataHolder) {
 	val vm = c.vm
 	Terminal(vm, logFile = "install_${System.currentTimeMillis()}.txt") { terminal ->
 		if (c.t == null) { // OS install
-			val parts = ArrayMap<Int, String>()
+			val parts = ArrayMap<Int, Int>()
 			val fn = c.t2.value
 			val gn = c.t3.value
 			terminal.add(vm.activity.getString(R.string.term_f_name, fn))
 			terminal.add(vm.activity.getString(R.string.term_g_name, gn))
+			val tmpFile = c.chosen["_install.sh_"]!!.toFile(vm)
+			tmpFile.setExecutable(true)
 			terminal.add(vm.activity.getString(R.string.term_creating_pt))
 
 			// After creating partitions:
 			fun installMore() {
+				val meta = SDUtils.generateMeta(vm.deviceInfo)
+				if (meta == null) {
+					terminal.add(vm.activity.getString(R.string.term_cant_get_meta))
+					return
+				}
 				terminal.add(vm.activity.getString(R.string.term_building_cfg))
 
 				val entry = ConfigFile()
@@ -918,11 +933,11 @@ private fun Flash(c: CreatePartDataHolder) {
 				entry["linux"] = "$fn/zImage"
 				entry["initrd"] = "$fn/initrd.cpio.gz"
 				entry["dtb"] = "$fn/dtb.dtb"
-				if (vm.deviceInfo!!.havedtbo)
+				if (vm.deviceInfo.havedtbo)
 					entry["dtbo"] = "$fn/dtbo.dtbo"
 				entry["options"] = c.cmdline
 				entry["xtype"] = c.rtype
-				entry["xpart"] = parts.values.join(":")
+				entry["xpart"] = parts.values.joinToString(":")
 				if (c.dmaMeta.contains("updateJson") && c.dmaMeta["updateJson"] != null)
 					entry["xupdate"] = c.dmaMeta["updateJson"]!!
 				entry.exportToFile(File(vm.logic.abmEntries, "$fn.conf"))
@@ -937,7 +952,7 @@ private fun Flash(c: CreatePartDataHolder) {
 					val j = c.idVals.indexOf(i)
 					terminal.add(vm.activity.getString(R.string.term_flashing_s, i))
 					val f = c.chosen[i]!!
-					val tp = File(c.vm.deviceInfo!!.pbdev + parts[j])
+					val tp = File(meta.dumpKernelPartition(parts[j]!!).path)
 					if (c.sparseVals[j]) {
 						val f2 = f.toFile(c.vm)
 						val result2 = Shell.cmd(
@@ -959,17 +974,14 @@ private fun Flash(c: CreatePartDataHolder) {
 				}
 
 				terminal.add(vm.activity.getString(R.string.term_patching_os))
-				var cmd = "FORMATDATA=true " + File(
-					c.vm.logic.assetDir,
-					"Scripts/add_os/${c.vm.deviceInfo!!.codename}/${c.shName}"
-				).absolutePath + " $fn"
+				var cmd = "FORMATDATA=true " + tmpFile.absolutePath + " $fn"
 				for (i in c.extraIdNeeded) {
 					cmd += " " + c.chosen[i]!!.toFile(vm).absolutePath
 				}
 				for (i in parts) {
 					cmd += " " + i.value
 				}
-				val result = Shell.cmd(cmd).to(terminal).exec()
+				val result = vm.logic.runShFileWithArgs(cmd).to(terminal).exec()
 				if (!result.isSuccess) {
 					terminal.add(vm.activity.getString(R.string.term_failure))
 					return
@@ -1000,25 +1012,25 @@ private fun Flash(c: CreatePartDataHolder) {
 					(BigDecimal(c.p.size - (offset + c.f)).multiply(BigDecimal(b).divide(BigDecimal(100)))).toLong()
 				}
 
-				vm.logic.unmount(vm.deviceInfo!!)
-				val r = Shell.cmd(SDUtils.umsd(c.meta!!) + " && " + c.p.create(offset, offset + k, code, "")).to(terminal).exec()
+				vm.logic.unmountBootset()
+				val r = vm.logic.create(c.p, offset, offset + k, code, "").to(terminal).exec()
 				try {
 					if (r.out.join("\n").contains("kpartx")) {
 						terminal.add(vm.activity.getString(R.string.term_reboot_asap))
 					}
-					parts[it] = c.meta!!.nid.toString()
-					c.meta = SDUtils.generateMeta(c.vm.deviceInfo!!.bdev, c.vm.deviceInfo.pbdev)
-					if (it + 1 < c.count.value) {
+					parts[it] = c.meta!!.nid
+					c.meta = SDUtils.generateMeta(c.vm.deviceInfo)
+					if (it + 1 < c.count.intValue) {
 						c.p = c.meta!!.s.find { it1 -> it1.type == SDUtils.PartitionType.FREE && (offset + k) < it1.startSector } as SDUtils.Partition.FreeSpace
 					}
 					if (r.isSuccess) {
 						terminal.add(vm.activity.getString(R.string.term_created_part))
 						offset = 0L
-						if (it + 1 < c.count.value) {
+						if (it + 1 < c.count.intValue) {
 							makeOne(it + 1)
 						} else {
 							terminal.add(vm.activity.getString(R.string.term_created_pt))
-							vm.logic.mount(vm.deviceInfo)
+							vm.logic.mountBootset(vm.deviceInfo)
 							installMore()
 						}
 					} else {
@@ -1032,14 +1044,12 @@ private fun Flash(c: CreatePartDataHolder) {
 			makeOne(0)
 		} else { // Portable partition
 			terminal.add(vm.activity.getString(R.string.term_create_part))
-			val r = Shell.cmd(
-				SDUtils.umsd(c.meta!!) + " && " + c.p.create(
+			val r = vm.logic.create(c.p,
 					c.l.toLong(),
 					c.u.toLong(),
 					"0700",
 					c.t!!
-				)
-			).to(terminal).exec()
+				).to(terminal).exec()
 			if (r.out.join("\n").contains("kpartx")) {
 				terminal.add(vm.activity.getString(R.string.term_reboot_asap))
 			}

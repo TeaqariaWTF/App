@@ -19,11 +19,16 @@ class UpdateDroidBootWizardPageFactory(private val vm: WizardActivityState) {
 	fun get(): List<IWizardPage> {
 		return listOf(WizardPage("start",
 			NavButton(vm.activity.getString(R.string.cancel)) { it.finish() },
-			NavButton(vm.activity.getString(R.string.next)) { it.navigate("select") })
+			NavButton(vm.activity.getString(R.string.next)) { it.navigate(if (vm.deviceInfo.postInstallScript) "shSel" else "select") })
 		{
-			Start(vm)
-		}, WizardPage("select",
+			Start()
+		}, WizardPage("shSel",
 			NavButton(vm.activity.getString(R.string.prev)) { it.navigate("start") },
+			NavButton("") {}
+		) {
+			SelectInstallSh(vm, update = true)
+		},WizardPage("select",
+			NavButton(vm.activity.getString(R.string.prev)) { it.navigate(if (vm.deviceInfo.postInstallScript) "shSel" else "start") },
 			NavButton("") {}
 		) {
 			SelectDroidBoot(vm)
@@ -37,7 +42,7 @@ class UpdateDroidBootWizardPageFactory(private val vm: WizardActivityState) {
 }
 
 @Composable
-private fun Start(vm: WizardActivityState) {
+private fun Start() {
 	Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
 		modifier = Modifier.fillMaxSize()
 	) {
@@ -48,19 +53,33 @@ private fun Start(vm: WizardActivityState) {
 
 @Composable
 private fun Flash(vm: WizardActivityState) {
-	val flashType = "DroidBootFlashType"
 	Terminal(vm, logFile = "blup_${System.currentTimeMillis()}.txt") { terminal ->
+		val tmpFile = if (vm.deviceInfo.postInstallScript) {
+			val tmpFile = createTempFileSu("abm", ".sh", vm.logic.rootTmpDir)
+			vm.copyPriv(vm.flashStream("InstallShFlashType"), tmpFile)
+			tmpFile.setExecutable(true)
+			tmpFile
+		} else null
 		terminal.add(vm.activity.getString(R.string.term_flashing_droidboot))
-		val f = SuFile.open(vm.deviceInfo!!.blBlock)
+		val f = SuFile.open(vm.deviceInfo.blBlock)
 		if (!f.canWrite())
 			terminal.add(vm.activity.getString(R.string.term_cant_write_bl))
-		vm.copyPriv(SuFileInputStream.open(vm.deviceInfo.blBlock), File(vm.logic.abmDir, "backup2_lk.img"))
+		vm.copyPriv(SuFileInputStream.open(vm.deviceInfo.blBlock), File(vm.logic.fileDir, "backup2_lk.img"))
 		try {
-			vm.copyPriv(vm.flashStream(flashType), File(vm.deviceInfo.blBlock))
+			vm.copyPriv(vm.flashStream("DroidBootFlashType"), File(vm.deviceInfo.blBlock))
 		} catch (e: IOException) {
 			terminal.add(vm.activity.getString(R.string.term_bl_failed))
 			terminal.add(if (e.message != null) e.message!! else "(null)")
 			terminal.add(vm.activity.getString(R.string.term_consult_doc))
+			return@Terminal
+		}
+		if (vm.deviceInfo.postInstallScript) {
+			terminal.add(vm.activity.getString(R.string.term_device_setup))
+			vm.logic.runShFileWithArgs(
+				"BOOTED=${vm.deviceInfo.isBooted(vm.logic)} SETUP=false " +
+						"${tmpFile!!.absolutePath} real"
+			).to(terminal).exec()
+			tmpFile.delete()
 		}
 		terminal.add(vm.activity.getString(R.string.term_success))
 		vm.activity.runOnUiThread {

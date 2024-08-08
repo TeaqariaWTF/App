@@ -1,8 +1,8 @@
 package org.andbootmgr.app
 
+import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -29,6 +29,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.topjohnwu.superuser.io.SuFileOutputStream
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.andbootmgr.app.util.AbmTheme
@@ -41,6 +43,8 @@ import java.io.OutputStream
 import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.DigestInputStream
+import java.security.MessageDigest
 
 class WizardPageFactory(private val vm: WizardActivityState) {
 	fun get(flow: String): List<IWizardPage> {
@@ -66,6 +70,7 @@ class WizardActivity : ComponentActivity() {
 		super.onCreate(savedInstanceState)
 		vm = WizardActivityState(intent.getStringExtra("codename")!!)
 		vm.activity = this
+		vm.deviceInfo = JsonDeviceInfoFactory(this).get(vm.codename)!!
 		vm.logic = DeviceLogic(this)
 		chooseFile = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
 			if (uri == null) {
@@ -141,6 +146,8 @@ class WizardActivity : ComponentActivity() {
 		}
 	}
 
+	@SuppressLint("MissingSuperCall")
+	@Deprecated("Deprecated in Java")
 	override fun onBackPressed() {
 		vm.onPrev.value(this)
 	}
@@ -174,19 +181,31 @@ class WizardActivity : ComponentActivity() {
 	}
 }
 
+private class ExpectedDigestInputStream(stream: InputStream?,
+                                        digest: MessageDigest?,
+                                        private val expectedDigest: String
+) : DigestInputStream(stream, digest) {
+	@OptIn(ExperimentalStdlibApi::class)
+	fun doAssert() {
+		val hash = digest.digest().toHexString()
+		if (hash != expectedDigest)
+			throw IllegalArgumentException("digest $hash does not match expected hash $expectedDigest")
+	}
+}
+
 class WizardActivityState(val codename: String) {
 	var btnsOverride = false
 	lateinit var navController: NavHostController
 	lateinit var activity: WizardActivity
 	lateinit var logic: DeviceLogic
-	val deviceInfo = HardcodedDeviceInfoFactory.get(codename)
-	var current = mutableStateOf("start")
+	lateinit var deviceInfo: DeviceInfo
+	private var current = mutableStateOf("start")
 	var prevText = mutableStateOf("")
 	var nextText = mutableStateOf("")
 	var onPrev: MutableState<(WizardActivity) -> Unit> = mutableStateOf({})
 	var onNext: MutableState<(WizardActivity) -> Unit> = mutableStateOf({})
 
-	var flashes: HashMap<String, Uri> = HashMap()
+	var flashes: HashMap<String, Pair<Uri, String?>> = HashMap()
 	var texts: HashMap<String, String> = HashMap()
 
 	fun navigate(next: String) {
@@ -206,21 +225,26 @@ class WizardActivityState(val codename: String) {
 		inputStream.close()
 		outputStream.flush()
 		outputStream.close()
+		if (inputStream is ExpectedDigestInputStream)
+			inputStream.doAssert()
 		return nread
 	}
 
 	fun flashStream(flashType: String): InputStream {
 		return flashes[flashType]?.let {
-			when (it.scheme) {
+			val i = when (it.first.scheme) {
 				"content" ->
-					activity.contentResolver.openInputStream(it)
+					activity.contentResolver.openInputStream(it.first)
 						?: throw IOException("in == null")
 				"file" ->
-					FileInputStream(it.toFile())
+					FileInputStream(it.first.toFile())
 				"http", "https" ->
-					URL(it.toString()).openStream()
+					URL(it.first.toString()).openStream()
 				else -> null
 			}
+			if (it.second != null)
+				ExpectedDigestInputStream(i, MessageDigest.getInstance("SHA-256"), it.second!!)
+			else i
 		} ?: throw IllegalArgumentException()
 	}
 
@@ -290,7 +314,7 @@ private fun Preview() {
 
 /* Monospace auto-scrolling text view, fed using MutableList<String>, catching exceptions and running logic on a different thread */
 @Composable
-fun Terminal(vm: WizardActivityState, logFile: String? = null, r: (MutableList<String>) -> Unit) {
+fun Terminal(vm: WizardActivityState, logFile: String? = null, action: suspend (MutableList<String>) -> Unit) {
 	val scrollH = rememberScrollState()
 	val scrollV = rememberScrollState()
 	val scope = rememberCoroutineScope()
@@ -405,15 +429,15 @@ fun Terminal(vm: WizardActivityState, logFile: String? = null, r: (MutableList<S
 			}
 
 		}
-		Thread {
+		CoroutineScope(Dispatchers.Default).launch {
 			try {
-				r(s)
+				action(s)
 			} catch (e: Throwable) {
 				s.add(vm.activity.getString(R.string.term_failure))
 				s.add(vm.activity.getString(R.string.dev_details))
 				s.add(Log.getStackTraceString(e))
 			}
-		}.start()
+		}
 		onDispose {
 			log?.close()
 		}
